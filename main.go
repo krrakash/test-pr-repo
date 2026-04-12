@@ -9,15 +9,21 @@ import (
 
 // PRPayload represents minimal pull request payload from GitHub
 type PRPayload struct {
-	Action      string `json:"action"`
-	Number      int    `json:"number"`
+	Action string `json:"action"`
+	Number int    `json:"number"`
+
 	PullRequest struct {
 		URL  string `json:"url"`
 		HTML string `json:"html_url"`
 	} `json:"pull_request"`
+
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+
+	Installation struct {
+		ID int64 `json:"id"`
+	} `json:"installation"`
 }
 
 // Webhook handler
@@ -33,25 +39,28 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Event:", event)
 
-	// Only handle pull_request events
-	if event == "pull_request" {
-		var payload PRPayload
-
-		err := json.Unmarshal(body, &payload)
-		if err != nil {
-			log.Println("Error parsing JSON:", err)
-			http.Error(w, "invalid payload", http.StatusBadRequest)
-			return
-		}
-
-		log.Println("------ PR DETAILS ------")
-		log.Println("Action:", payload.Action)
-		log.Println("PR Number:", payload.Number)
-		log.Println("Repo:", payload.Repository.FullName)
-		log.Println("PR API URL:", payload.PullRequest.URL)
-		log.Println("PR HTML URL:", payload.PullRequest.HTML)
-		log.Println("------------------------")
+	// Ignore everything except pull_request
+	if event != "pull_request" {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
+
+	var payload PRPayload
+	err = json.Unmarshal(body, &payload)
+	if err != nil {
+		log.Println("Error parsing JSON:", err)
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	log.Println("------ PR DETAILS ------")
+	log.Println("Action:", payload.Action)
+	log.Println("PR Number:", payload.Number)
+	log.Println("Repo:", payload.Repository.FullName)
+	log.Println("PR API URL:", payload.PullRequest.URL)
+	log.Println("PR HTML URL:", payload.PullRequest.HTML)
+	log.Println("Installation ID:", payload.Installation.ID)
+	log.Println("------------------------")
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
