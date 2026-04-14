@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,8 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const AppID int64 = 3359240 // 🔴 CHANGE THIS
-
+const AppID int64 = 3359240
 const PrivateKeyPath = "pair-agent.2026-04-12.private-key.pem"
 
 // PRPayload represents minimal pull request payload
@@ -63,6 +64,43 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 	return token.SignedString(privateKey)
 }
 
+// ===== INSTALLATION TOKEN =====
+func getInstallationToken(jwtToken string, installationID int64) (string, error) {
+	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 201 {
+		return "", fmt.Errorf("failed to get token: %s", string(body))
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		return "", err
+	}
+
+	return result.Token, nil
+}
+
 // ===== WEBHOOK HANDLER =====
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
@@ -76,7 +114,6 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Event:", event)
 
-	// Ignore non PR events
 	if event != "pull_request" {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -99,16 +136,24 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Println("Installation ID:", payload.Installation.ID)
 	log.Println("------------------------")
 
-	// ===== DEBUG: JWT STEP =====
+	// ===== JWT =====
 	log.Println("About to generate JWT...")
-
 	jwtToken, err := generateJWT(AppID, PrivateKeyPath)
 	if err != nil {
 		log.Println("JWT error:", err)
 		return
 	}
+	log.Println("JWT generated successfully")
 
-	log.Println("JWT generated successfully:", jwtToken[:30], "...")
+	// ===== INSTALLATION TOKEN =====
+	log.Println("Getting installation token...")
+	installationToken, err := getInstallationToken(jwtToken, payload.Installation.ID)
+	if err != nil {
+		log.Println("Installation token error:", err)
+		return
+	}
+
+	log.Println("Installation token:", installationToken[:20], "...")
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
