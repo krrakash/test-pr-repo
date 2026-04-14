@@ -11,13 +11,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// ======== CONFIG ========
-// Replace with your actual App ID
 const AppID int64 = 3359240 // 🔴 CHANGE THIS
 
 const PrivateKeyPath = "pair-agent.2026-04-12.private-key.pem"
-
-// ========================
 
 // PRPayload represents minimal pull request payload
 type PRPayload struct {
@@ -40,10 +36,14 @@ type PRPayload struct {
 
 // ===== JWT GENERATION =====
 func generateJWT(appID int64, pemPath string) (string, error) {
+	log.Println("Reading PEM file...")
+
 	keyData, err := os.ReadFile(pemPath)
 	if err != nil {
 		return "", err
 	}
+
+	log.Println("Parsing PEM key...")
 
 	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(keyData)
 	if err != nil {
@@ -57,6 +57,8 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 		"exp": now.Add(10 * time.Minute).Unix(),
 		"iss": appID,
 	})
+
+	log.Println("Signing JWT...")
 
 	return token.SignedString(privateKey)
 }
@@ -97,14 +99,16 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Println("Installation ID:", payload.Installation.ID)
 	log.Println("------------------------")
 
-	// ===== GENERATE JWT =====
+	// ===== DEBUG: JWT STEP =====
+	log.Println("About to generate JWT...")
+
 	jwtToken, err := generateJWT(AppID, PrivateKeyPath)
 	if err != nil {
 		log.Println("JWT error:", err)
 		return
 	}
 
-	log.Println("JWT generated:", jwtToken[:30], "...")
+	log.Println("JWT generated successfully:", jwtToken[:30], "...")
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
