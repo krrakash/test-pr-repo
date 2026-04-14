@@ -16,7 +16,7 @@ import (
 const AppID int64 = 3359240
 const PrivateKeyPath = "pair-agent.2026-04-12.private-key.pem"
 
-// PRPayload represents minimal pull request payload
+// ===== STRUCTS =====
 type PRPayload struct {
 	Action string `json:"action"`
 	Number int    `json:"number"`
@@ -35,16 +35,12 @@ type PRPayload struct {
 	} `json:"installation"`
 }
 
-// ===== JWT GENERATION =====
+// ===== JWT =====
 func generateJWT(appID int64, pemPath string) (string, error) {
-	log.Println("Reading PEM file...")
-
 	keyData, err := os.ReadFile(pemPath)
 	if err != nil {
 		return "", err
 	}
-
-	log.Println("Parsing PEM key...")
 
 	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(keyData)
 	if err != nil {
@@ -58,8 +54,6 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 		"exp": now.Add(10 * time.Minute).Unix(),
 		"iss": appID,
 	})
-
-	log.Println("Signing JWT...")
 
 	return token.SignedString(privateKey)
 }
@@ -101,7 +95,63 @@ func getInstallationToken(jwtToken string, installationID int64) (string, error)
 	return result.Token, nil
 }
 
-// ===== WEBHOOK HANDLER =====
+// ===== FETCH PR FILES =====
+func getPRFiles(token, repo string, prNumber int) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/files", repo, prNumber)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("failed to fetch PR files: %s", string(body))
+	}
+
+	var files []struct {
+		Filename string `json:"filename"`
+		Patch    string `json:"patch"`
+	}
+
+	err = json.Unmarshal(body, &files)
+	if err != nil {
+		return err
+	}
+
+	log.Println("===== CHANGED FILES =====")
+
+	for _, f := range files {
+		log.Println("File:", f.Filename)
+
+		if f.Patch != "" {
+			previewLen := 200
+			if len(f.Patch) < previewLen {
+				previewLen = len(f.Patch)
+			}
+
+			log.Println("Patch preview:")
+			log.Println(f.Patch[:previewLen])
+		}
+
+		log.Println("-------------------------")
+	}
+
+	return nil
+}
+
+// ===== HANDLER =====
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 
@@ -131,29 +181,31 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Println("Action:", payload.Action)
 	log.Println("PR Number:", payload.Number)
 	log.Println("Repo:", payload.Repository.FullName)
-	log.Println("PR API URL:", payload.PullRequest.URL)
-	log.Println("PR HTML URL:", payload.PullRequest.HTML)
 	log.Println("Installation ID:", payload.Installation.ID)
 	log.Println("------------------------")
 
-	// ===== JWT =====
-	log.Println("About to generate JWT...")
+	// JWT
 	jwtToken, err := generateJWT(AppID, PrivateKeyPath)
 	if err != nil {
 		log.Println("JWT error:", err)
 		return
 	}
-	log.Println("JWT generated successfully")
 
-	// ===== INSTALLATION TOKEN =====
-	log.Println("Getting installation token...")
+	// Installation token
 	installationToken, err := getInstallationToken(jwtToken, payload.Installation.ID)
 	if err != nil {
 		log.Println("Installation token error:", err)
 		return
 	}
 
-	log.Println("Installation token:", installationToken[:20], "...")
+	log.Println("Installation token acquired")
+
+	// Fetch PR files
+	err = getPRFiles(installationToken, payload.Repository.FullName, payload.Number)
+	if err != nil {
+		log.Println("Error fetching PR files:", err)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
