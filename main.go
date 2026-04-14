@@ -5,9 +5,21 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
-// PRPayload represents minimal pull request payload from GitHub
+// ======== CONFIG ========
+// Replace with your actual App ID
+const AppID int64 = 3359240 // 🔴 CHANGE THIS
+
+const PrivateKeyPath = "pair-agent.2026-04-12.private-key.pem"
+
+// ========================
+
+// PRPayload represents minimal pull request payload
 type PRPayload struct {
 	Action string `json:"action"`
 	Number int    `json:"number"`
@@ -26,7 +38,30 @@ type PRPayload struct {
 	} `json:"installation"`
 }
 
-// Webhook handler
+// ===== JWT GENERATION =====
+func generateJWT(appID int64, pemPath string) (string, error) {
+	keyData, err := os.ReadFile(pemPath)
+	if err != nil {
+		return "", err
+	}
+
+	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(keyData)
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iat": now.Unix() - 60,
+		"exp": now.Add(10 * time.Minute).Unix(),
+		"iss": appID,
+	})
+
+	return token.SignedString(privateKey)
+}
+
+// ===== WEBHOOK HANDLER =====
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 
@@ -39,7 +74,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Event:", event)
 
-	// Ignore everything except pull_request
+	// Ignore non PR events
 	if event != "pull_request" {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -62,10 +97,20 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log.Println("Installation ID:", payload.Installation.ID)
 	log.Println("------------------------")
 
+	// ===== GENERATE JWT =====
+	jwtToken, err := generateJWT(AppID, PrivateKeyPath)
+	if err != nil {
+		log.Println("JWT error:", err)
+		return
+	}
+
+	log.Println("JWT generated:", jwtToken[:30], "...")
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
+// ===== MAIN =====
 func main() {
 	http.HandleFunc("/webhooks/github", handleWebhook)
 
