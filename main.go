@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// ===== STRUCT =====
 type PRPayload struct {
 	Number int `json:"number"`
 
@@ -55,14 +56,25 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 func getInstallationToken(jwtToken string, installationID int64) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return "", err
+	}
+
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 201 {
+		return "", fmt.Errorf("github error: %s", string(body))
+	}
 
 	var result struct {
 		Token string `json:"token"`
@@ -72,40 +84,40 @@ func getInstallationToken(jwtToken string, installationID int64) (string, error)
 	return result.Token, nil
 }
 
-// ===== GEMINI (FIXED) =====
-func analyzeWithGemini(patch string) (string, error) {
-	apiKey := os.Getenv("GEMINI_API_KEY")
+// ===== OPENROUTER =====
+func analyzeWithLLM(patch string) (string, error) {
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
 
-	url := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=%s",
-		apiKey,
-	)
+	url := "https://openrouter.ai/api/v1/chat/completions"
 
 	prompt := fmt.Sprintf(`
-You are a senior backend engineer.
+You are a senior backend engineer reviewing a PR.
 
-Analyze this code diff and:
-- find bugs
-- find risks
-- give short actionable feedback
+Analyze this code diff:
+- Find bugs
+- Identify production risks
+- Suggest improvements
+- Be concise and actionable
 
-Code:
+Code Diff:
 %s
 `, patch)
 
 	body := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]string{
-					{"text": prompt},
-				},
-			},
+		"model": "anthropic/claude-3-haiku", // cheap + fast
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
 		},
 	}
 
 	jsonData, _ := json.Marshal(body)
 
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -116,29 +128,23 @@ Code:
 
 	resBody, _ := io.ReadAll(resp.Body)
 
-	// 🔥 DEBUG RAW RESPONSE
-	log.Println("Gemini RAW:", string(resBody))
+	log.Println("OpenRouter RAW:", string(resBody))
 
-	var result map[string]interface{}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
 	json.Unmarshal(resBody, &result)
 
-	// 🔥 SAFE PARSING
-	candidates, ok := result["candidates"].([]interface{})
-	if !ok || len(candidates) == 0 {
-		return "No candidates in response", nil
+	if len(result.Choices) == 0 {
+		return "No response from LLM", nil
 	}
 
-	candidate := candidates[0].(map[string]interface{})
-	content := candidate["content"].(map[string]interface{})
-	parts := content["parts"].([]interface{})
-
-	if len(parts) == 0 {
-		return "No parts in response", nil
-	}
-
-	text := parts[0].(map[string]interface{})["text"].(string)
-
-	return text, nil
+	return result.Choices[0].Message.Content, nil
 }
 
 // ===== PROCESS PR =====
@@ -172,11 +178,16 @@ func processPR(token, repo string, prNumber int) {
 			continue
 		}
 
+		// 🔥 limit size
+		if len(f.Patch) > 3000 {
+			f.Patch = f.Patch[:3000]
+		}
+
 		log.Println("Analyzing:", f.Filename)
 
-		result, err := analyzeWithGemini(f.Patch)
+		result, err := analyzeWithLLM(f.Patch)
 		if err != nil {
-			log.Println("Gemini error:", err)
+			log.Println("LLM error:", err)
 			continue
 		}
 
