@@ -77,7 +77,7 @@ func analyzeWithGemini(patch string) (string, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 
 	url := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=%s",
+		"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=%s",
 		apiKey,
 	)
 
