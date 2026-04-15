@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -16,15 +17,9 @@ import (
 const AppID int64 = 3359240
 const PrivateKeyPath = "pair-agent.2026-04-12.private-key.pem"
 
-// ===== STRUCTS =====
+// ===== STRUCT =====
 type PRPayload struct {
-	Action string `json:"action"`
-	Number int    `json:"number"`
-
-	PullRequest struct {
-		URL  string `json:"url"`
-		HTML string `json:"html_url"`
-	} `json:"pull_request"`
+	Number int `json:"number"`
 
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -58,7 +53,7 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 	return token.SignedString(privateKey)
 }
 
-// ===== INSTALLATION TOKEN =====
+// ===== INSTALL TOKEN =====
 func getInstallationToken(jwtToken string, installationID int64) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 
@@ -70,8 +65,7 @@ func getInstallationToken(jwtToken string, installationID int64) (string, error)
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -95,8 +89,83 @@ func getInstallationToken(jwtToken string, installationID int64) (string, error)
 	return result.Token, nil
 }
 
-// ===== FETCH PR FILES =====
-func getPRFiles(token, repo string, prNumber int) error {
+// ===== GEMINI =====
+func analyzeWithGemini(patch string) (string, error) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+
+	if apiKey == "" {
+		return "", fmt.Errorf("GEMINI_API_KEY not set")
+	}
+
+	url := fmt.Sprintf(
+		"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=%s",
+		apiKey,
+	)
+
+	prompt := fmt.Sprintf(`
+You are a senior backend engineer reviewing a PR.
+
+Analyze the following code diff:
+- Identify bugs
+- Identify production risks
+- Suggest improvements
+- Be concise
+
+Code Diff:
+%s
+`, patch)
+
+	reqBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{
+				"parts": []map[string]string{
+					{"text": prompt},
+				},
+			},
+		},
+	}
+
+	jsonData, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		return "", err
+	}
+
+	if len(result.Candidates) == 0 {
+		return "No response from Gemini", nil
+	}
+
+	return result.Candidates[0].Content.Parts[0].Text, nil
+}
+
+// ===== PROCESS PR =====
+func processPR(token, repo string, prNumber int) error {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/files", repo, prNumber)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -105,20 +174,14 @@ func getPRFiles(token, repo string, prNumber int) error {
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("failed to fetch PR files: %s", string(body))
-	}
 
 	var files []struct {
 		Filename string `json:"filename"`
@@ -130,22 +193,30 @@ func getPRFiles(token, repo string, prNumber int) error {
 		return err
 	}
 
-	log.Println("===== CHANGED FILES =====")
+	log.Println("===== AI ANALYSIS =====")
 
 	for _, f := range files {
-		log.Println("File:", f.Filename)
 
-		if f.Patch != "" {
-			previewLen := 200
-			if len(f.Patch) < previewLen {
-				previewLen = len(f.Patch)
-			}
-
-			log.Println("Patch preview:")
-			log.Println(f.Patch[:previewLen])
+		// 🔥 FILTER ONLY CODE FILES
+		if !strings.HasSuffix(f.Filename, ".go") {
+			continue
 		}
 
-		log.Println("-------------------------")
+		if f.Patch == "" {
+			continue
+		}
+
+		log.Println("Analyzing:", f.Filename)
+
+		result, err := analyzeWithGemini(f.Patch)
+		if err != nil {
+			log.Println("Gemini error:", err)
+			continue
+		}
+
+		log.Println("AI RESULT:")
+		log.Println(result)
+		log.Println("----------------------------")
 	}
 
 	return nil
@@ -155,60 +226,36 @@ func getPRFiles(token, repo string, prNumber int) error {
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Println("Error reading body:", err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	log.Println("Event:", event)
-
 	if event != "pull_request" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	body, _ := io.ReadAll(r.Body)
+
 	var payload PRPayload
-	err = json.Unmarshal(body, &payload)
-	if err != nil {
-		log.Println("Error parsing JSON:", err)
-		http.Error(w, "invalid payload", http.StatusBadRequest)
-		return
-	}
+	json.Unmarshal(body, &payload)
 
-	log.Println("------ PR DETAILS ------")
-	log.Println("Action:", payload.Action)
-	log.Println("PR Number:", payload.Number)
-	log.Println("Repo:", payload.Repository.FullName)
-	log.Println("Installation ID:", payload.Installation.ID)
-	log.Println("------------------------")
+	log.Println("Processing PR:", payload.Number)
 
-	// JWT
 	jwtToken, err := generateJWT(AppID, PrivateKeyPath)
 	if err != nil {
 		log.Println("JWT error:", err)
 		return
 	}
 
-	// Installation token
 	installationToken, err := getInstallationToken(jwtToken, payload.Installation.ID)
 	if err != nil {
 		log.Println("Installation token error:", err)
 		return
 	}
 
-	log.Println("Installation token acquired")
-
-	// Fetch PR files
-	err = getPRFiles(installationToken, payload.Repository.FullName, payload.Number)
+	err = processPR(installationToken, payload.Repository.FullName, payload.Number)
 	if err != nil {
-		log.Println("Error fetching PR files:", err)
-		return
+		log.Println("Process PR error:", err)
 	}
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+	w.Write([]byte("ok"))
 }
 
 // ===== MAIN =====
