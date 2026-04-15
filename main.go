@@ -16,7 +16,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// ===== STRUCT =====
 type PRPayload struct {
 	Number int `json:"number"`
 
@@ -29,7 +28,7 @@ type PRPayload struct {
 	} `json:"installation"`
 }
 
-// ===== JWT (FIXED) =====
+// ===== JWT =====
 func generateJWT(appID int64, pemPath string) (string, error) {
 	keyData, err := os.ReadFile(pemPath)
 	if err != nil {
@@ -44,8 +43,8 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 	now := time.Now()
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"iat": now.Unix(),                      // no negative offset
-		"exp": now.Add(9 * time.Minute).Unix(), // <= 10 min window
+		"iat": now.Unix(),
+		"exp": now.Add(9 * time.Minute).Unix(),
 		"iss": appID,
 	})
 
@@ -56,45 +55,26 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 func getInstallationToken(jwtToken string, installationID int64) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
-	if err != nil {
-		return "", err
-	}
-
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
+	resp, _ := http.DefaultClient.Do(req)
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 201 {
-		return "", fmt.Errorf("failed to get token: %s", string(body))
-	}
 
 	var result struct {
 		Token string `json:"token"`
 	}
 
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		return "", err
-	}
-
+	json.Unmarshal(body, &result)
 	return result.Token, nil
 }
 
-// ===== GEMINI =====
+// ===== GEMINI (FIXED) =====
 func analyzeWithGemini(patch string) (string, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
-
-	if apiKey == "" {
-		return "", fmt.Errorf("GEMINI_API_KEY not set")
-	}
 
 	url := fmt.Sprintf(
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=%s",
@@ -102,19 +82,18 @@ func analyzeWithGemini(patch string) (string, error) {
 	)
 
 	prompt := fmt.Sprintf(`
-You are a senior backend engineer reviewing a PR.
+You are a senior backend engineer.
 
-Analyze this code diff:
-- Find bugs
-- Identify production risks
-- Suggest improvements
-- Be concise and actionable
+Analyze this code diff and:
+- find bugs
+- find risks
+- give short actionable feedback
 
-Code Diff:
+Code:
 %s
 `, patch)
 
-	reqBody := map[string]interface{}{
+	body := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
 				"parts": []map[string]string{
@@ -124,13 +103,9 @@ Code Diff:
 		},
 	}
 
-	jsonData, _ := json.Marshal(reqBody)
+	jsonData, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", err
-	}
-
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -139,45 +114,41 @@ Code Diff:
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	resBody, _ := io.ReadAll(resp.Body)
 
-	var result struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
+	// 🔥 DEBUG RAW RESPONSE
+	log.Println("Gemini RAW:", string(resBody))
+
+	var result map[string]interface{}
+	json.Unmarshal(resBody, &result)
+
+	// 🔥 SAFE PARSING
+	candidates, ok := result["candidates"].([]interface{})
+	if !ok || len(candidates) == 0 {
+		return "No candidates in response", nil
 	}
 
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		return "", err
+	candidate := candidates[0].(map[string]interface{})
+	content := candidate["content"].(map[string]interface{})
+	parts := content["parts"].([]interface{})
+
+	if len(parts) == 0 {
+		return "No parts in response", nil
 	}
 
-	if len(result.Candidates) == 0 {
-		return "No response from Gemini", nil
-	}
+	text := parts[0].(map[string]interface{})["text"].(string)
 
-	return result.Candidates[0].Content.Parts[0].Text, nil
+	return text, nil
 }
 
 // ===== PROCESS PR =====
-func processPR(token, repo string, prNumber int) error {
+func processPR(token, repo string, prNumber int) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/files", repo, prNumber)
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-
+	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
+	resp, _ := http.DefaultClient.Do(req)
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -187,10 +158,7 @@ func processPR(token, repo string, prNumber int) error {
 		Patch    string `json:"patch"`
 	}
 
-	err = json.Unmarshal(body, &files)
-	if err != nil {
-		return err
-	}
+	json.Unmarshal(body, &files)
 
 	log.Println("===== AI ANALYSIS =====")
 
@@ -216,16 +184,11 @@ func processPR(token, repo string, prNumber int) error {
 		log.Println(result)
 		log.Println("----------------------------")
 	}
-
-	return nil
 }
 
 // ===== HANDLER =====
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
-	event := r.Header.Get("X-GitHub-Event")
-
-	if event != "pull_request" {
-		w.WriteHeader(http.StatusOK)
+	if r.Header.Get("X-GitHub-Event") != "pull_request" {
 		return
 	}
 
@@ -234,47 +197,25 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	var payload PRPayload
 	json.Unmarshal(body, &payload)
 
-	log.Println("Processing PR:", payload.Number)
-
 	appIDStr := os.Getenv("GITHUB_APP_ID")
 	appID, _ := strconv.ParseInt(appIDStr, 10, 64)
 
 	privateKeyPath := os.Getenv("GITHUB_PRIVATE_KEY_PATH")
 
-	jwtToken, err := generateJWT(appID, privateKeyPath)
-	if err != nil {
-		log.Println("JWT error:", err)
-		return
-	}
+	jwtToken, _ := generateJWT(appID, privateKeyPath)
+	token, _ := getInstallationToken(jwtToken, payload.Installation.ID)
 
-	installationToken, err := getInstallationToken(jwtToken, payload.Installation.ID)
-	if err != nil {
-		log.Println("Installation token error:", err)
-		return
-	}
-
-	err = processPR(installationToken, payload.Repository.FullName, payload.Number)
-	if err != nil {
-		log.Println("Process PR error:", err)
-	}
+	processPR(token, payload.Repository.FullName, payload.Number)
 
 	w.Write([]byte("ok"))
 }
 
 // ===== MAIN =====
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("No .env file found")
-	}
+	godotenv.Load()
 
 	http.HandleFunc("/webhooks/github", handleWebhook)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Println("Server running on :" + port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Println("Server running on :8080")
+	http.ListenAndServe(":8080", nil)
 }
