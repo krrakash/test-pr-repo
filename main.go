@@ -8,14 +8,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 )
-
-const AppID int64 = 3359240
-const PrivateKeyPath = "pair-agent.2026-04-12.private-key.pem"
 
 // ===== STRUCT =====
 type PRPayload struct {
@@ -197,7 +196,6 @@ func processPR(token, repo string, prNumber int) error {
 
 	for _, f := range files {
 
-		// 🔥 FILTER ONLY CODE FILES
 		if !strings.HasSuffix(f.Filename, ".go") {
 			continue
 		}
@@ -238,7 +236,12 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("Processing PR:", payload.Number)
 
-	jwtToken, err := generateJWT(AppID, PrivateKeyPath)
+	appIDStr := os.Getenv("GITHUB_APP_ID")
+	appID, _ := strconv.ParseInt(appIDStr, 10, 64)
+
+	privateKeyPath := os.Getenv("GITHUB_PRIVATE_KEY_PATH")
+
+	jwtToken, err := generateJWT(appID, privateKeyPath)
 	if err != nil {
 		log.Println("JWT error:", err)
 		return
@@ -260,11 +263,18 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 // ===== MAIN =====
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("No .env file found")
+	}
+
 	http.HandleFunc("/webhooks/github", handleWebhook)
 
-	log.Println("Server running on :8080")
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		log.Fatal("Server failed:", err)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
+
+	log.Println("Server running on :" + port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
