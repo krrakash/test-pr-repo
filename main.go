@@ -29,7 +29,7 @@ type PRPayload struct {
 	} `json:"installation"`
 }
 
-// ===== JWT =====
+// ===== JWT (FIXED) =====
 func generateJWT(appID int64, pemPath string) (string, error) {
 	keyData, err := os.ReadFile(pemPath)
 	if err != nil {
@@ -44,8 +44,8 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 	now := time.Now()
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"iat": now.Unix() - 60,
-		"exp": now.Add(10 * time.Minute).Unix(),
+		"iat": now.Unix(),                      // no negative offset
+		"exp": now.Add(9 * time.Minute).Unix(), // <= 10 min window
 		"iss": appID,
 	})
 
@@ -104,11 +104,11 @@ func analyzeWithGemini(patch string) (string, error) {
 	prompt := fmt.Sprintf(`
 You are a senior backend engineer reviewing a PR.
 
-Analyze the following code diff:
-- Identify bugs
+Analyze this code diff:
+- Find bugs
 - Identify production risks
 - Suggest improvements
-- Be concise
+- Be concise and actionable
 
 Code Diff:
 %s
