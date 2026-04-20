@@ -282,6 +282,13 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
+func demoPr(v int) (string, error) {
+	if v == 0 {
+		return "zero", nil
+	}
+	return "non-zero", nil
+}
+
 // ===== MAIN =====
 
 func main() {
