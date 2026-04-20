@@ -25,6 +25,12 @@ type PRPayload struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 
+	PullRequest struct {
+		Head struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	} `json:"pull_request"`
+
 	Installation struct {
 		ID int64 `json:"id"`
 	} `json:"installation"`
@@ -67,25 +73,14 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 func getInstallationToken(jwtToken string, installationID int64) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
-	if err != nil {
-		return "", err
-	}
-
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer([]byte("{}")))
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
+	resp, _ := http.DefaultClient.Do(req)
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 201 {
-		return "", fmt.Errorf("github error: %s", string(body))
-	}
 
 	var result struct {
 		Token string `json:"token"`
@@ -113,35 +108,15 @@ func analyzeWithLLM(patch string, filename string) ([]Issue, error) {
 	url := "https://openrouter.ai/api/v1/chat/completions"
 
 	prompt := fmt.Sprintf(`
-You are a senior backend engineer reviewing production Go code.
-
 Return ONLY JSON.
+Be specific. No generic words.
 
-STRICT RULES:
-- No generic words like "problem", "impact", "solution"
-- Reference actual code behavior
-- Mention specific function or pattern from diff
-- Be concise but concrete
-
-Focus ONLY on:
-- runtime bugs
-- error handling issues
-- security risks
-- incorrect logic
-
-Ignore:
-- formatting
-- style
-
-Return max 5 issues.
-
-Format:
 [
   {
     "file": "%s",
-    "issue": "specific issue referencing code",
-    "risk": "real production impact",
-    "fix": "exact actionable fix",
+    "issue": "...",
+    "risk": "...",
+    "fix": "...",
     "severity": "LOW | MEDIUM | HIGH"
   }
 ]
@@ -163,10 +138,7 @@ Code Diff:
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
+	resp, _ := http.DefaultClient.Do(req)
 	defer resp.Body.Close()
 
 	resBody, _ := io.ReadAll(resp.Body)
@@ -189,36 +161,22 @@ Code Diff:
 	clean := cleanJSONResponse(raw)
 
 	var issues []Issue
-	err = json.Unmarshal([]byte(clean), &issues)
-	if err != nil {
-		log.Println("JSON parse failed, using fallback")
-		return demoIssues(filename), nil
-	}
+	json.Unmarshal([]byte(clean), &issues)
 
 	return issues, nil
 }
 
-// ===== DEMO FALLBACK =====
+// ===== INLINE COMMENT =====
 
-func demoIssues(filename string) []Issue {
-	return []Issue{
-		{
-			File:     filename,
-			Issue:    "Error from HTTP request may not be handled properly",
-			Risk:     "Failure in external API call could silently break logic",
-			Fix:      "Check error return from http.DefaultClient.Do and handle it",
-			Severity: "HIGH",
-		},
-	}
-}
+func postInlineComment(token, repo string, prNumber int, commitID string, path string, body string) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/comments", repo, prNumber)
 
-// ===== POST COMMENT =====
-
-func postPRComment(token, repo string, prNumber int, body string) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, prNumber)
-
-	payload := map[string]string{
-		"body": body,
+	payload := map[string]interface{}{
+		"body":      body,
+		"commit_id": commitID,
+		"path":      path,
+		"line":      1, // MVP: attach to top of file
+		"side":      "RIGHT",
 	}
 
 	jsonData, _ := json.Marshal(payload)
@@ -227,22 +185,18 @@ func postPRComment(token, repo string, prNumber int, body string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Println("❌ Request failed:", err)
-		return
-	}
+	resp, _ := http.DefaultClient.Do(req)
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
-	log.Println("GitHub Status:", resp.StatusCode)
-	log.Println("GitHub Response:", string(respBody))
+	log.Println("Inline Status:", resp.StatusCode)
+	log.Println("Inline Response:", string(respBody))
 }
 
 // ===== PROCESS PR =====
 
-func processPR(token, repo string, prNumber int) {
+func processPR(token, repo string, prNumber int, commitID string) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/files", repo, prNumber)
 
 	req, _ := http.NewRequest("GET", url, nil)
@@ -260,8 +214,6 @@ func processPR(token, repo string, prNumber int) {
 
 	json.Unmarshal(body, &files)
 
-	var allComments strings.Builder
-
 	for _, f := range files {
 
 		if !strings.HasSuffix(f.Filename, ".go") || f.Patch == "" {
@@ -272,38 +224,21 @@ func processPR(token, repo string, prNumber int) {
 			f.Patch = f.Patch[:3000]
 		}
 
-		issues, err := analyzeWithLLM(f.Patch, f.Filename)
-		if err != nil {
-			issues = demoIssues(f.Filename)
-		}
+		issues, _ := analyzeWithLLM(f.Patch, f.Filename)
 
 		for _, i := range issues {
+
 			comment := fmt.Sprintf(
-				"### 🚨 %s Issue\n"+
-					"**File:** `%s`\n"+
-					"**Issue:** %s\n"+
-					"**Risk:** %s\n"+
-					"**Fix:** %s\n\n---\n",
+				"🚨 %s\nIssue: %s\nRisk: %s\nFix: %s",
 				i.Severity,
-				i.File,
 				i.Issue,
 				i.Risk,
 				i.Fix,
 			)
 
-			allComments.WriteString(comment)
+			postInlineComment(token, repo, prNumber, commitID, f.Filename, comment)
 		}
 	}
-
-	// 🔥 Prevent spam
-	if allComments.Len() < 20 {
-		log.Println("Skipping weak/empty comment")
-		return
-	}
-
-	log.Println("COMMENT BODY:\n", allComments.String())
-
-	postPRComment(token, repo, prNumber, allComments.String())
 }
 
 // ===== HANDLER =====
@@ -326,7 +261,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	jwtToken, _ := generateJWT(appID, privateKeyPath)
 	token, _ := getInstallationToken(jwtToken, payload.Installation.ID)
 
-	processPR(token, payload.Repository.FullName, payload.Number)
+	processPR(token, payload.Repository.FullName, payload.Number, payload.PullRequest.Head.SHA)
 
 	w.Write([]byte("ok"))
 }
