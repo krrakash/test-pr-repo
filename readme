@@ -1,0 +1,12 @@
+First test change.
+ID added to initiate tracking of git diff.
+To check if jwt is configured properly. (Test 1)
+To check if jwt is configured properly. (Test 2)
+
+
+Test 1:=> To get the PR git diff
+
+
+Test 2:=> This is just a text added in readme to check if ai is giving response  or not.
+
+Test 3:=> Checking Gemini API.
