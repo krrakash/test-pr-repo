@@ -113,15 +113,13 @@ func analyzeWithLLM(patch string, filename string) ([]Issue, error) {
 	url := "https://openrouter.ai/api/v1/chat/completions"
 
 	prompt := fmt.Sprintf(`
-You are a senior backend engineer.
-
 Return ONLY JSON:
 [
   {
     "file": "%s",
-    "issue": "specific problem",
-    "risk": "real impact",
-    "fix": "exact fix",
+    "issue": "problem",
+    "risk": "impact",
+    "fix": "solution",
     "severity": "LOW | MEDIUM | HIGH"
   }
 ]
@@ -178,7 +176,7 @@ Code Diff:
 	return issues, nil
 }
 
-// ===== DEMO FALLBACK =====
+// ===== DEMO =====
 
 func demoIssues(filename string) []Issue {
 	return []Issue{
@@ -192,7 +190,7 @@ func demoIssues(filename string) []Issue {
 	}
 }
 
-// ===== POST COMMENT =====
+// ===== POST COMMENT (FIXED DEBUG) =====
 
 func postPRComment(token, repo string, prNumber int, body string) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, prNumber)
@@ -209,12 +207,15 @@ func postPRComment(token, repo string, prNumber int, body string) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Println("Comment error:", err)
+		log.Println("❌ Request failed:", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	log.Println("✅ Comment posted")
+	respBody, _ := io.ReadAll(resp.Body)
+
+	log.Println("GitHub Status:", resp.StatusCode)
+	log.Println("GitHub Response:", string(respBody))
 }
 
 // ===== PROCESS PR =====
@@ -267,6 +268,8 @@ func processPR(token, repo string, prNumber int) {
 			allComments.WriteString(comment)
 		}
 	}
+
+	log.Println("COMMENT BODY:\n", allComments.String())
 
 	if allComments.Len() > 0 {
 		postPRComment(token, repo, prNumber, allComments.String())
