@@ -113,13 +113,35 @@ func analyzeWithLLM(patch string, filename string) ([]Issue, error) {
 	url := "https://openrouter.ai/api/v1/chat/completions"
 
 	prompt := fmt.Sprintf(`
-Return ONLY JSON:
+You are a senior backend engineer reviewing production Go code.
+
+Return ONLY JSON.
+
+STRICT RULES:
+- No generic words like "problem", "impact", "solution"
+- Reference actual code behavior
+- Mention specific function or pattern from diff
+- Be concise but concrete
+
+Focus ONLY on:
+- runtime bugs
+- error handling issues
+- security risks
+- incorrect logic
+
+Ignore:
+- formatting
+- style
+
+Return max 5 issues.
+
+Format:
 [
   {
     "file": "%s",
-    "issue": "problem",
-    "risk": "impact",
-    "fix": "solution",
+    "issue": "specific issue referencing code",
+    "risk": "real production impact",
+    "fix": "exact actionable fix",
     "severity": "LOW | MEDIUM | HIGH"
   }
 ]
@@ -176,21 +198,21 @@ Code Diff:
 	return issues, nil
 }
 
-// ===== DEMO =====
+// ===== DEMO FALLBACK =====
 
 func demoIssues(filename string) []Issue {
 	return []Issue{
 		{
 			File:     filename,
-			Issue:    "HTTP request error not handled",
-			Risk:     "Silent failure possible",
-			Fix:      "Check error after request",
+			Issue:    "Error from HTTP request may not be handled properly",
+			Risk:     "Failure in external API call could silently break logic",
+			Fix:      "Check error return from http.DefaultClient.Do and handle it",
 			Severity: "HIGH",
 		},
 	}
 }
 
-// ===== POST COMMENT (FIXED DEBUG) =====
+// ===== POST COMMENT =====
 
 func postPRComment(token, repo string, prNumber int, body string) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, prNumber)
@@ -257,7 +279,11 @@ func processPR(token, repo string, prNumber int) {
 
 		for _, i := range issues {
 			comment := fmt.Sprintf(
-				"### 🚨 %s\n**File:** %s\n**Issue:** %s\n**Risk:** %s\n**Fix:** %s\n\n",
+				"### 🚨 %s Issue\n"+
+					"**File:** `%s`\n"+
+					"**Issue:** %s\n"+
+					"**Risk:** %s\n"+
+					"**Fix:** %s\n\n---\n",
 				i.Severity,
 				i.File,
 				i.Issue,
@@ -269,11 +295,15 @@ func processPR(token, repo string, prNumber int) {
 		}
 	}
 
+	// 🔥 Prevent spam
+	if allComments.Len() < 20 {
+		log.Println("Skipping weak/empty comment")
+		return
+	}
+
 	log.Println("COMMENT BODY:\n", allComments.String())
 
-	if allComments.Len() > 0 {
-		postPRComment(token, repo, prNumber, allComments.String())
-	}
+	postPRComment(token, repo, prNumber, allComments.String())
 }
 
 // ===== HANDLER =====
