@@ -16,7 +16,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// ===== STRUCT =====
+// ===== STRUCTS =====
+
 type PRPayload struct {
 	Number int `json:"number"`
 
@@ -29,7 +30,16 @@ type PRPayload struct {
 	} `json:"installation"`
 }
 
+type Issue struct {
+	File     string `json:"file"`
+	Issue    string `json:"issue"`
+	Risk     string `json:"risk"`
+	Fix      string `json:"fix"`
+	Severity string `json:"severity"`
+}
+
 // ===== JWT =====
+
 func generateJWT(appID int64, pemPath string) (string, error) {
 	keyData, err := os.ReadFile(pemPath)
 	if err != nil {
@@ -53,6 +63,7 @@ func generateJWT(appID int64, pemPath string) (string, error) {
 }
 
 // ===== INSTALL TOKEN =====
+
 func getInstallationToken(jwtToken string, installationID int64) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 
@@ -84,27 +95,59 @@ func getInstallationToken(jwtToken string, installationID int64) (string, error)
 	return result.Token, nil
 }
 
-// ===== OPENROUTER =====
-func analyzeWithLLM(patch string) (string, error) {
+// ===== CLEAN JSON =====
+
+func cleanJSONResponse(raw string) string {
+	raw = strings.TrimSpace(raw)
+
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+
+	return strings.TrimSpace(raw)
+}
+
+// ===== OPENROUTER LLM =====
+
+func analyzeWithLLM(patch string, filename string) ([]Issue, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 
 	url := "https://openrouter.ai/api/v1/chat/completions"
 
 	prompt := fmt.Sprintf(`
-You are a senior backend engineer reviewing a PR.
+You are a senior backend engineer reviewing production code.
 
-Analyze this code diff:
-- Find bugs
-- Identify production risks
-- Suggest improvements
-- Be concise and actionable
+Return ONLY valid JSON. No explanations.
+
+Focus ONLY on:
+- runtime bugs
+- security risks
+- incorrect logic
+- missing error handling
+
+Ignore:
+- style issues
+- formatting
+
+Return max 5 issues.
+
+Output format:
+[
+  {
+    "file": "%s",
+    "issue": "specific problem",
+    "risk": "real production impact",
+    "fix": "exact fix",
+    "severity": "LOW | MEDIUM | HIGH"
+  }
+]
 
 Code Diff:
 %s
-`, patch)
+`, filename, patch)
 
 	body := map[string]interface{}{
-		"model": "anthropic/claude-3-haiku", // cheap + fast
+		"model": "anthropic/claude-3-haiku",
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
@@ -114,7 +157,7 @@ Code Diff:
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -122,7 +165,7 @@ Code Diff:
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -141,13 +184,25 @@ Code Diff:
 	json.Unmarshal(resBody, &result)
 
 	if len(result.Choices) == 0 {
-		return "No response from LLM", nil
+		return nil, fmt.Errorf("no response from LLM")
 	}
 
-	return result.Choices[0].Message.Content, nil
+	rawText := result.Choices[0].Message.Content
+	cleaned := cleanJSONResponse(rawText)
+
+	var issues []Issue
+	err = json.Unmarshal([]byte(cleaned), &issues)
+	if err != nil {
+		log.Println("❌ JSON parse failed")
+		log.Println("RAW:", rawText)
+		return nil, err
+	}
+
+	return issues, nil
 }
 
 // ===== PROCESS PR =====
+
 func processPR(token, repo string, prNumber int) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d/files", repo, prNumber)
 
@@ -178,26 +233,32 @@ func processPR(token, repo string, prNumber int) {
 			continue
 		}
 
-		// 🔥 limit size
 		if len(f.Patch) > 3000 {
 			f.Patch = f.Patch[:3000]
 		}
 
 		log.Println("Analyzing:", f.Filename)
 
-		result, err := analyzeWithLLM(f.Patch)
+		issues, err := analyzeWithLLM(f.Patch, f.Filename)
 		if err != nil {
 			log.Println("LLM error:", err)
 			continue
 		}
 
-		log.Println("AI RESULT:")
-		log.Println(result)
-		log.Println("----------------------------")
+		for _, i := range issues {
+			log.Println("----- ISSUE -----")
+			log.Println("File:", i.File)
+			log.Println("Severity:", i.Severity)
+			log.Println("Issue:", i.Issue)
+			log.Println("Risk:", i.Risk)
+			log.Println("Fix:", i.Fix)
+			log.Println("------------------")
+		}
 	}
 }
 
 // ===== HANDLER =====
+
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-GitHub-Event") != "pull_request" {
 		return
@@ -222,6 +283,7 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // ===== MAIN =====
+
 func main() {
 	godotenv.Load()
 
